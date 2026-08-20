@@ -1,0 +1,6 @@
+.env
+result/
+__pycache__/
+*.xlsx
+*.xls
+*.pdf
