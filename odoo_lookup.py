@@ -7,7 +7,7 @@ Usage:
 
 import sys
 
-from odoo_client import OdooClient, OdooError
+from odoo_client import OdooError, prompt_login
 from categorize import classify
 
 
@@ -19,7 +19,7 @@ def main():
     codes = sys.argv[1:]
 
     try:
-        odoo = OdooClient()
+        odoo = prompt_login()
         products = odoo.lookup_products_by_code(codes)
     except OdooError as e:
         print(f"ERROR: {e}", file=sys.stderr)

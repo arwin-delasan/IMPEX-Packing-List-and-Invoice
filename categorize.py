@@ -106,7 +106,6 @@ ODOO_CATEGORY_MAP = [
     ("All / Finished Goods / Accessories / Doors & Handles / Glass Window", "Sauna Accessories", "Glass Window"),
     ("All / Finished Goods / Accessories / Doors & Handles / Wooden Doors", "Sauna Accessories", "Sauna Door"),
     ("All / Finished Goods / Accessories / Doors & Handles / Wooden Handles", "Sauna Accessories", "Door Handle"),
-    ("All / Finished Goods / Accessories / Doors & Handles", "Sauna Accessories", "Door"),
     ("All / Finished Goods / Accessories / Guards & Collars", "Sauna Accessories", "Heater Guard"),
     ("All / Finished Goods / Accessories / Head-& Backrests", "Sauna Accessories", "Backrest"),
     ("All / Finished Goods / Accessories / Lights & Covers", "Sauna Accessories", "Sauna Light Cover"),
@@ -157,7 +156,6 @@ _NAME_RULES = [
     ("user interface", "User Interface", None),
     ("control unit", "Sauna Spare Parts", "Control Unit"),
     ("glass door", "Sauna Accessories", "Glass Door"),
-    ("door", "Sauna Accessories", "Door"),
     ("glass window", "Sauna Accessories", "Glass Window"),
     ("handle", "Sauna Accessories", "Door Handle"),
     ("towel", "Sauna Accessories", "Wood Cloth Hanger"),
@@ -201,7 +199,7 @@ def classify(code, name, categ_path=None):
     if c.startswith("LED-SUPPLY"):
         return "Sauna Spare Parts", "Control Unit"
     if c.startswith("HIM"):
-        return "Sauna Accessories", "Himalayan Salt"
+        return "Sauna Accessories", "Himalayan Salt Wall"
     if re.match(r"^LP\d", c):
         if "wire" in n or "splitter" in n:
             return "Sauna Spare Parts", "Wire / Cable"
@@ -224,6 +222,12 @@ def classify(code, name, categ_path=None):
     # regardless of what the product actually is.
     if "heater guard" in n:  # e.g. "Wooden Heater Guard for DRFT12" with no GUARD in the code
         return "Sauna Accessories", f"{guess_material(name)} Heater Guard"
+    if "safety switch" in n:
+        # e.g. "Safety Switch for Wall-Mounted Heaters" - checked before
+        # the "heater" catch-all below, since these names always mention
+        # "Heaters" too. Odoo files these under Accessories/Heaters
+        # (-> "Heater Accessory"), but they should be Spare Parts / Switch.
+        return "Sauna Spare Parts", "Switch"
     if "heater" in n:  # heaters always sit under Sauna Equipment
         return "Sauna Equipment", "Sauna Heater"
     if "steam gen" in n:  # e.g. "Steam Gen. Next Series 12,0kW 3P Australia"
@@ -239,13 +243,26 @@ def classify(code, name, categ_path=None):
         # Spare Parts item regardless of what it's a spare part *for*.
         return "Sauna Spare Parts", None
     if "heating element" in n:
-        return "Sauna Spare Parts", None
+        return "Sauna Spare Parts", "Heating Element"
     if "contactor unit" in n:  # e.g. "Saunova 2.0 Contactor Unit" (not always INP- coded)
         return "Sauna Power Controller", None
+    if "card" in n and "board" not in n:
+        # e.g. "Business Cards, Cedar", "Stone Card Holder" - excludes
+        # "board" so a correctly-spelled "Cardboard" (Odoo's own SKU for
+        # this has a typo, "Carboard", but a PDF might spell it right)
+        # doesn't get swept in here.
+        return "Sauna Other Item", None
     if "sauna room" in n:  # catches room codes that don't use the SR.. prefix
         return "Sauna Room", None
     if "accessory set" in n:
         return "Sauna Accessories", "Wooden Pail"
+    if "tank" in n and "humidifier" in n and "box" not in n:
+        # e.g. "Cozy Tank Humidifier Cylindrical 0.6L". Excludes "box" -
+        # two real Odoo SKUs are packaging *for* this tank, not the tank
+        # itself ("Item Box for Cozy Tank Sauna Humidifier...", "Box -
+        # HP01-070 Cozy Tank Sauna Humidifier...") and fall through to
+        # their own (correct) Odoo category instead.
+        return "Sauna Spare Parts", "Heater Tank Humidifier"
     if "pail shower" in n:
         return "Sauna Accessories", "Pail Shower"
     if "wooden cover" in n:
@@ -261,6 +278,20 @@ def classify(code, name, categ_path=None):
         return "Sauna Accessories", f"{guess_material(name)} Pail"
     if "cube door" in n:
         return "Sauna Accessories", "Glass Door"
+    if "glass" in n and re.search(r"\bdoor\b", n):
+        # word-boundary on "door" specifically: a plain substring check
+        # would misfire on "Outdoor"/"Indoor" (e.g. "...Glass Front
+        # Outdoor Sauna Room" - a whole finished room, not a door) since
+        # both literally contain "door". Excludes a couple of real
+        # false-positive SKUs found checking this catalog-wide: a door
+        # hinge described as "Glass to Glass Hinge", and a door frame
+        # explicitly described as "w/out Glass".
+        if "hinge" not in n and "w/out glass" not in n and "without glass" not in n:
+            return "Sauna Accessories", "Glass Door"
+    if "wood" in n and re.search(r"\bdoor\b", n):
+        # Deliberately not word-boundary on "wood" - this should also
+        # catch "Wooden Door", not just bare "Wood Door".
+        return "Sauna Accessories", "Sauna Door"
     if "sensor" in n and "holder" in n:
         return "Sauna Accessories", "Interface Holder"
     if "display stand" in n:
@@ -281,7 +312,7 @@ def classify(code, name, categ_path=None):
         # heaters and steam generators. All grouped under one "Steam Head
         # Cover" subtype header historically, regardless of which specific
         # heater/generator model they're for.
-        return "Sauna Spare Parts", "Steam Head Cover"
+        return "Sauna Accessories", "Steam Head Cover"
     if "carton box" in n or "carboard box" in n:
         # e.g. "Carton Box for ECOT 3H.E", "Carboard Box (Cirrus-2HE)" -
         # heater shipping cartons. Matches the "Packaging" category their
@@ -293,12 +324,13 @@ def classify(code, name, categ_path=None):
         # "Marketing Material" category most of these already have in
         # Odoo (mapped to Sauna Accessories - see ODOO_CATEGORY_MAP).
         return "Sauna Accessories", None
+    if "catch pan" in n:
+        return "Sauna Spare Parts", "Catch Pan"
     if (
         "reflector" in n
         or "reflection sheet" in n
         or "rock container" in n
         or "rock containe" in n  # typo in some real Odoo SKUs, e.g. "Rock Containe Assy 6HE"
-        or "catch pan" in n
         or "wire set" in n
         or "bottom cover" in n
         or "top cover" in n
@@ -363,19 +395,31 @@ def classify_subgroup(category, subtype, code, name):
     together under one Sub-Total despite sharing a header:
 
     - "Wire / Cable" covers both actual wire (LP15-005/006) and three-way
-      splitters (LP15-002); same header, separate Sub-Totals.
+      splitters (LP15-002); same header, separate Sub-Totals, no printed
+      sub-label for the splitter split (unlike Steam Generator below).
     - "Sauna Other Item" collects a grab-bag of otherwise-unrelated
       products with no specific subtype (Signage, Sauna Guidelines, ...).
       Each distinct product code gets its own Sub-Total there - grouped
       only with other rows of the *same* code (repeated shipment lines for
       one product), never merged with a different product just because
       neither has a subtype.
+    - "Sauna Heater" covers both actual heaters and steam generators
+      ("steam gen" in the name - see classify()); same header, separate
+      Sub-Totals, since they shouldn't be summed together despite both
+      being Sauna Equipment / Sauna Heater.
+
     Defaults to the subtype itself (one Sub-Total per header, the normal
     case for every other category, e.g. Sauna Room stays one block)."""
     if subtype is None and category == "Sauna Other Item":
         return code
     if subtype == "Wire / Cable" and "splitter" in name.lower():
-        return f"{subtype} :: Splitter"
+        # No " :: " here on purpose - that's what build_workbook() reads
+        # as "print a sub-label row". Splitters get their own Sub-Total
+        # (this key just has to differ from `subtype`) but no printed
+        # label, unlike Steam Generator below.
+        return f"{subtype} (Splitter)"
+    if subtype == "Sauna Heater" and "steam gen" in name.lower():
+        return f"{subtype} :: Steam Generator"
     return subtype
 
 

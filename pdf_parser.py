@@ -9,7 +9,7 @@ from datetime import datetime
 
 import pdfplumber
 
-UM_CODES = ("BX", "UN", "PC", "RL", "ST", "BOT")
+UM_CODES = ("BX", "UN", "PC", "RL", "ST", "BOT", "PL", "PK", "SET")
 
 GRAND_TOTAL_ANCHORS = {
     "packages": 365,
@@ -59,9 +59,9 @@ def parse_header(text):
         fail("PDF header block is shorter than expected.")
     l2, l3, l4, l5, l6, l7, l8 = lines[idx + 1: idx + 8]
 
-    m2 = re.search(r"^(.*?)\s+Invoice No\.:\s*(.*)$", l2)
-    m3 = re.search(r"^(.*?)\s+Container No\.:\s*(.*)$", l3)
-    m4 = re.search(r"^(.*?)\s+Seal No\.:\s*(.*)$", l4)
+    m2 = re.search(r"^(.*?)\s*Invoice No\.:\s*(.*)$", l2)
+    m3 = re.search(r"^(.*?)\s*Container No\.:\s*(.*)$", l3)
+    m4 = re.search(r"^(.*?)\s*Seal No\.:\s*(.*)$", l4)
     m5 = re.search(r"Destination:\s*(.*)$", l5)
     m6 = re.search(r"^Tel\. No\.:\s*(.*?)\s+Payment Terms:\s*(.*)$", l6)
     m7 = re.search(r"^Fax No\.:\s*(.*)$", l7)
@@ -167,10 +167,17 @@ def classify_item_row(words):
         desc_words = texts[i:n - 4]
     else:
         suffix = next((c for c in UM_CODES if um_token.endswith(c) and len(um_token) > len(c)), None)
-        if suffix is None:
-            fail(f"Could not find UM code ({'/'.join(UM_CODES)}) in row: {texts}")
-        um = suffix
-        desc_words = texts[i:n - 4] + [um_token[: -len(suffix)]]
+        if suffix is not None:
+            um = suffix
+            desc_words = texts[i:n - 4] + [um_token[: -len(suffix)]]
+        else:
+            # An unrecognized UM code (not in UM_CODES, e.g. a new
+            # shipping-unit abbreviation we haven't seen before) shouldn't
+            # block the whole packing list from generating - leave it
+            # blank for a human to fill in/investigate rather than failing
+            # the entire extraction over one row.
+            um = ""
+            desc_words = texts[i:n - 4]
 
     return {
         "external_code": external_code,

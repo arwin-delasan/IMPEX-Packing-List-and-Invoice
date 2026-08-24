@@ -35,12 +35,17 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
+from openpyxl.styles import Border
 
-from pdf_parser import ExtractionError, extract_pdf
+from pdf_parser import ExtractionError
+from pdf_parser import extract_pdf as custom_extract_pdf
+from odoo_pdf_parser import extract_pdf as odoo_extract_pdf
 from categorize import UNCATEGORIZED, category_sort_key, classify, classify_subgroup, subtype_sort_key
-from odoo_client import OdooClient, OdooError
+from overrides import OverridesError, get_override, load_overrides
+from odoo_client import OdooError, prompt_login
+from app_paths import app_path
 
-REFERENCE_PATH = "PL1 - Copy.xlsx"
+REFERENCE_PATH = app_path("PL1 - Copy.xlsx")
 SHEET_NAME = "summary"
 
 # Column layout (1-indexed), same in the reference and our output.
@@ -93,7 +98,20 @@ def derive_so_numbers(header):
     return ", ".join(parts)
 
 
-def classify_items(items, odoo):
+def um_warnings(items):
+    """Flag rows whose UM code wasn't recognized (pdf_parser.py leaves it
+    blank rather than failing the whole extraction) so it doesn't silently
+    ship with an empty UM cell."""
+    return [
+        f"{it['external_code']}: unrecognized UM code on this row - left blank, please fill in manually"
+        for it in items if not it["um"]
+    ]
+
+
+def classify_items(items, odoo, overrides=None):
+    if overrides is None:
+        overrides = load_overrides()
+
     codes = [it["external_code"] for it in items]
     try:
         products = odoo.lookup_products_by_code(codes)
@@ -108,27 +126,33 @@ def classify_items(items, odoo):
         if not rec:
             warnings.append(f"{code}: not found in Odoo (classification may be less reliable)")
 
-        # The PDF's own description is always used as the displayed name -
-        # it's what was actually printed/shipped, and won't drift if Odoo's
-        # product name changes later. Odoo's name/category are used only to
-        # help classify the item, not to relabel it. Both wordings are fed
-        # to classify()'s keyword matching, since Odoo's name and the PDF's
-        # description sometimes describe the same product differently
-        # (e.g. Odoo's "Wooden Door with Window" vs the PDF's "...with
-        # Small Glass Window") - checking only one risks missing a keyword
-        # that only appears in the other.
-        odoo_name = rec["name"] if rec else it["description"]
-        classify_name = odoo_name if odoo_name == it["description"] else f"{odoo_name} {it['description']}"
-        categ_path = rec["categ_id"][1] if rec and rec["categ_id"] else None
-        category, subtype = classify(code, classify_name, categ_path)
-        if category is None:
-            category = UNCATEGORIZED
-            warnings.append(f"{code} ({it['description']}): no classification rule matched")
+        override = get_override(code, overrides)
+        if override:
+            # A human already corrected this exact code - that always wins
+            # over classify()'s guess, no matter what it would otherwise say.
+            category, subtype = override["category"], override["subtype"]
+        else:
+            # The PDF's own description is always used as the displayed name -
+            # it's what was actually printed/shipped, and won't drift if Odoo's
+            # product name changes later. Odoo's name/category are used only to
+            # help classify the item, not to relabel it. Both wordings are fed
+            # to classify()'s keyword matching, since Odoo's name and the PDF's
+            # description sometimes describe the same product differently
+            # (e.g. Odoo's "Wooden Door with Window" vs the PDF's "...with
+            # Small Glass Window") - checking only one risks missing a keyword
+            # that only appears in the other.
+            odoo_name = rec["name"] if rec else it["description"]
+            classify_name = odoo_name if odoo_name == it["description"] else f"{odoo_name} {it['description']}"
+            categ_path = rec["categ_id"][1] if rec and rec["categ_id"] else None
+            category, subtype = classify(code, classify_name, categ_path)
+            if category is None:
+                category = UNCATEGORIZED
+                warnings.append(f"{code} ({it['description']}): no classification rule matched")
 
         subgroup = classify_subgroup(category, subtype, code, it["description"])
         classified.append({
             **it, "name": it["description"], "category": category, "subtype": subtype,
-            "subgroup": subgroup,
+            "subgroup": subgroup, "overridden": override is not None,
         })
     return classified, warnings
 
@@ -172,21 +196,120 @@ def build_blocks(classified_items):
 
 
 _SIGNATURE_DRAWING_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{to_col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{to_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Signature Box"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9360"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:miter/></a:ln></xdr:spPr><xdr:style><a:lnRef idx="0"/><a:fillRef idx="0"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></xdr:style><xdr:txBody><a:bodyPr lIns="20160" rIns="20160" tIns="20160" bIns="20160" anchor="t"><a:noAutofit/></a:bodyPr><a:p><a:r><a:rPr b="1" lang="en-US" sz="1100"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Tahoma"/></a:rPr><a:t>S A W O,  I N C.</a:t></a:r></a:p><a:p><a:endParaRPr lang="en-US" sz="800"/></a:p><a:p><a:endParaRPr lang="en-US" sz="800"/></a:p><a:p><a:r><a:rPr sz="800"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Arial Black"/></a:rPr><a:t>____________________________</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1000"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Tahoma"/></a:rPr><a:t>  Authorized Signatory</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"""
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<xdr:oneCellAnchor><xdr:from><xdr:col>{from_col}</xdr:col><xdr:colOff>{from_col_off}</xdr:colOff><xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="{width_emu}" cy="{height_emu}"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Signature Box"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="6360"><a:solidFill>
+<a:srgbClr val="000000"/></a:solidFill><a:miter/></a:ln></xdr:spPr><xdr:style><a:lnRef idx="0"/><a:fillRef idx="0"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></xdr:style><xdr:txBody><a:bodyPr lIns="20160" rIns="20160" tIns="20160" bIns="20160" anchor="t"><a:noAutofit/></a:bodyPr>
+<a:p><a:r><a:rPr b="1" lang="en-US" sz="1100"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Tahoma"/></a:rPr><a:t>S A W O,  I N C.</a:t></a:r></a:p>
+<a:p><a:endParaRPr lang="en-US" sz="800"/></a:p><a:p><a:endParaRPr lang="en-US" sz="800"/></a:p><a:p><a:endParaRPr lang="en-US" sz="800"/></a:p><a:p><a:r><a:rPr sz="800"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Arial Black"/></a:rPr><a:t>{underline}</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1000"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>
+<a:latin typeface="Tahoma"/></a:rPr><a:t>  Authorized Signatory</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"""
+
+_UNDERSCORE_EMU_PER_CHAR = 62388  # calibrated: 36 underscores looked right at a 2286286-EMU-wide box
+_TEXT_BODY_MARGIN_EMU = 20160 * 2  # bodyPr's lIns + rIns above
 
 
-def _inject_signature_shape(output_path, anchor_row):
+def _col_width_emu(ws, col_letter):
+    """A column's width in EMU, using the standard approximation for the
+    default font (Calibri 11, Maximum Digit Width 7px):
+    pixels = round(width * 7 + 5); 1 px = 9525 EMU at 96 DPI."""
+    dim = ws.column_dimensions.get(col_letter)
+    width = dim.width if dim and dim.width else 8.43  # Excel's own default column width
+    return round(width * 7 + 5) * 9525
+
+
+def _emu_size_for_cell_span(ws, first_col_letter, last_col_letter, first_row, num_rows):
+    """Approximate, in EMU, how big a cell range currently renders as -
+    used to give the signature shape an explicit, cell-geometry-independent
+    size (see _inject_signature_shape) derived from what its old
+    cell-stretched size used to be, rather than a made-up absolute number.
+    Row height is already in points; 1 pt = 12700 EMU exactly."""
+    total_width_emu = sum(
+        _col_width_emu(ws, chr(c))
+        for c in range(ord(first_col_letter), ord(last_col_letter) + 1)
+    )
+    total_height_pt = 0.0
+    for r in range(first_row, first_row + num_rows):
+        dim = ws.row_dimensions.get(r)
+        total_height_pt += dim.height if dim and dim.height else 15.0  # Excel's default row height
+    return total_width_emu, round(total_height_pt * 12700)
+
+
+def _x_emu_to_anchor(ws, target_x_emu, last_col_letter="Z"):
+    """Convert an absolute X offset (EMU, measured from column A's left
+    edge) into an OOXML drawing anchor (0-indexed column, colOff EMU
+    within that column) - walks columns left to right accumulating width
+    until target_x_emu lands inside one. Used to horizontally position
+    the signature shape by an absolute offset (e.g. centered against the
+    table) rather than "start of column B"."""
+    col_idx = 0  # 0-indexed; column A
+    remaining = max(0, round(target_x_emu))
+    while True:
+        letter = get_column_letter(col_idx + 1)
+        width_emu = _col_width_emu(ws, letter)
+        if remaining < width_emu or letter == last_col_letter:
+            return col_idx, remaining
+        remaining -= width_emu
+        col_idx += 1
+
+
+def add_signature_block(ws, output_path, sig_anchor_row, table_last_col):
+    """Size, center, and inject the "S A W O, I N C. / Authorized
+    Signatory" floating shape - shared by both generate_pl1.py and
+    generate_inv.py so the two documents' signature boxes stay visually
+    identical. Must be called after the workbook has already been saved
+    to output_path (the shape is added by patching the saved .xlsx's
+    OOXML directly - see _inject_signature_shape). sig_anchor_row is the
+    0-indexed row the shape's top edge sits on; the caller is expected to
+    have reserved 4 blank rows there. table_last_col is the last column
+    letter of the document's own item table (e.g. "H" for the packing
+    list, "F" for the invoice) - used to center the shape horizontally
+    against that table specifically, not the wider print area.
+    """
+    # Explicit size: 70% of the width / 140% of the height it used to
+    # render as when it was just stretched to fit a reserved B:D x 4-row
+    # cell span (see _emu_size_for_cell_span), then width narrowed by
+    # another 10% on top of that, then height bumped another 10% on top
+    # of the 140% (the extra blank paragraph in the drawing XML puts that
+    # growth in the gap between the title and the underline, not below
+    # "Authorized Signatory", so the underline's own position relative to
+    # the signature line beneath it doesn't shift).
+    current_width_emu, current_height_emu = _emu_size_for_cell_span(ws, "B", "D", sig_anchor_row, 4)
+    sig_width_emu = round(current_width_emu * 0.70 * 0.90)
+    sig_height_emu = round(current_height_emu * 1.40 * 1.10)
+
+    # Center the shape horizontally against the document's actual item
+    # table, not the wider print area (which can include blank
+    # template-leftover columns).
+    last_col_idx = ord(table_last_col.upper()) - ord("A") + 1
+    table_width_emu = sum(_col_width_emu(ws, get_column_letter(c)) for c in range(1, last_col_idx + 1))
+    target_x_emu = max(0, (table_width_emu - sig_width_emu) / 2)
+    sig_from_col, sig_from_col_off = _x_emu_to_anchor(ws, target_x_emu)
+
+    # Underline spans the shape's full inner width (shape width minus the
+    # text body's left/right insets), rather than a fixed guessed count.
+    underline_chars = max(1, round((sig_width_emu - _TEXT_BODY_MARGIN_EMU) / _UNDERSCORE_EMU_PER_CHAR))
+    sig_underline = "_" * underline_chars
+
+    _inject_signature_shape(
+        output_path, sig_anchor_row, sig_from_col, sig_from_col_off,
+        sig_width_emu, sig_height_emu, sig_underline,
+    )
+
+
+def _inject_signature_shape(output_path, anchor_row, from_col, from_col_off, width_emu, height_emu, underline_text):
     """Add the "S A W O, I N C. / Authorized Signatory" box as a real
     floating shape, matching the reference file's actual drawing XML
     (confirmed by inspecting it directly - it's a "Rectangle 2" shape, not
     cell content). openpyxl has no API for writing arbitrary shapes, so
     this patches the .xlsx openpyxl just saved: read it back as a zip, add
     the drawing part plus its relationship/content-type wiring, and
-    rewrite the archive. anchor_row is 0-indexed; the box spans 4 rows
-    (matching its height in the reference) across columns B:D.
+    rewrite the archive. anchor_row is 0-indexed. Anchored via
+    oneCellAnchor + an explicit ext (width_emu/height_emu), not stretched
+    to fit a cell range, so its size stays exactly what's asked for
+    regardless of column widths/row heights.
     """
     drawing_xml = _SIGNATURE_DRAWING_XML.format(
-        from_col=1, from_row=anchor_row, to_col=4, to_row=anchor_row + 4,
+        from_col=from_col, from_col_off=from_col_off, from_row=anchor_row,
+        width_emu=width_emu, height_emu=height_emu, underline=underline_text,
     )
 
     sheet_part = "xl/worksheets/sheet1.xml"  # the only sheet -> openpyxl always names it sheet1.xml
@@ -250,7 +373,7 @@ def _inject_signature_shape(output_path, anchor_row):
     os.replace(tmp_path, output_path)
 
 
-def build_workbook(header, blocks, output_path, odoo):
+def build_workbook(header, blocks, output_path):
     ref_wb = load_workbook(REFERENCE_PATH)
     ref_ws = ref_wb[SHEET_NAME]
 
@@ -273,7 +396,7 @@ def build_workbook(header, blocks, output_path, odoo):
     for col_letter, dim in ref_ws.column_dimensions.items():
         if dim.width:
             ws.column_dimensions[col_letter].width = dim.width
-    ws.row_dimensions[REF_HEADER_ROW - 1].height = 2  # spacer row directly above the column header
+    ws.row_dimensions[REF_HEADER_ROW - 1].height = 6  # spacer row directly above the column header
 
     # --- overwrite the header fields we can actually source ---
     ws.cell(row=3, column=COL_NAME, value=header["sold_to_company"])
@@ -282,20 +405,6 @@ def build_workbook(header, blocks, output_path, odoo):
     ws.cell(row=4, column=7, value=header["date"])  # already MM/DD/YYYY via extract_pdf
     ws.cell(row=6, column=7, value=header["destination"])
     ws.cell(row=10, column=7, value=derive_so_numbers(header))
-
-    # Contact Person / Contact No. (rows 10-11, col B) aren't on the PDF -
-    # look them up from the consignee's Odoo contact record. Never let a
-    # lookup hiccup (no match, connectivity blip, unexpected Odoo schema)
-    # block the actual packing list from being generated - worst case
-    # these cells just stay blank, same as before this lookup existed.
-    try:
-        contact = odoo.lookup_contact_by_company_name(header["sold_to_company"])
-    except Exception:
-        contact = None
-    if contact:
-        ws.cell(row=10, column=COL_NAME, value=contact["name"])
-        if contact["phone"]:
-            ws.cell(row=11, column=COL_NAME, value=contact["phone"])
 
     # --- copy the item-table header row (Product Code / Name / UM / ...) ---
     for c in range(1, COL_QTY + 1):
@@ -317,6 +426,11 @@ def build_workbook(header, blocks, output_path, odoo):
     row = REF_HEADER_ROW + 1
     style_row(row, REF_HEADER_ROW + 1)  # blank spacer row between the column header and the first block
     ws.row_dimensions[row].height = 3
+    # No border on this row's left/right outer edges specifically.
+    left_cell = ws.cell(row=row, column=COL_CODE)
+    left_cell.border = Border(top=left_cell.border.top, bottom=left_cell.border.bottom, right=left_cell.border.right)
+    right_cell = ws.cell(row=row, column=COL_QTY)
+    right_cell.border = Border(top=right_cell.border.top, bottom=right_cell.border.bottom, left=right_cell.border.left)
     row += 1
     subtotal_rows = []
     prev_category = None
@@ -333,9 +447,17 @@ def build_workbook(header, blocks, output_path, odoo):
 
         # Normally one sub-chunk per header; classify_subgroup() can split
         # a single subtype header into several Sub-Totals (see "Wire /
-        # Cable" splitting wire from splitters) without repeating the
-        # header/label row between them.
+        # Cable" splitting wire from splitters, or "Sauna Heater" splitting
+        # off steam generators). A split-off subgroup is keyed as
+        # "{subtype} :: {label}" - print that trailing label as its own
+        # sub-header (same style as the subtype row) so it reads the same
+        # way "Sauna Heater" itself does, rather than silently blending
+        # into the parent subtype's rows.
         for _subgroup, chunk_items in subchunks:
+            if _subgroup and " :: " in _subgroup:
+                sub_label = _subgroup.split(" :: ", 1)[1]
+                style_row(row, REF_SUBTYPE_ROW, {COL_CODE: sub_label})
+                row += 1
             first_item_row = row
             for it in chunk_items:
                 vals = {
@@ -424,7 +546,7 @@ def build_workbook(header, blocks, output_path, odoo):
     ws.oddHeader.right.text = "Page &P of  &N"
 
     wb.save(output_path)
-    _inject_signature_shape(output_path, sig_anchor_row)
+    add_signature_block(ws, output_path, sig_anchor_row, get_column_letter(COL_QTY))
 
 
 def validate(items, grand_total):
@@ -449,17 +571,24 @@ def validate(items, grand_total):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python generate_pl1.py <input.pdf> <output.xlsx>", file=sys.stderr)
+    argv = list(sys.argv[1:])
+    odoo_pdf = "--odoo" in argv
+    if odoo_pdf:
+        argv.remove("--odoo")
+    if len(argv) != 2:
+        print("Usage: python generate_pl1.py [--odoo] <input.pdf> <output.xlsx>", file=sys.stderr)
         sys.exit(1)
 
-    pdf_path, output_path = sys.argv[1], sys.argv[2]
+    pdf_path, output_path = argv
+    extract_pdf = odoo_extract_pdf if odoo_pdf else custom_extract_pdf
 
     try:
         header, items, grand_total = extract_pdf(pdf_path)
         print(f"✅ Extracted header block and {len(items)} line items from PDF.")
+        for w in um_warnings(items):
+            print(f"WARNING: {w}")
 
-        odoo = OdooClient()
+        odoo = prompt_login()
         print("✅ Connected to Odoo.")
 
         classified, warnings = classify_items(items, odoo)
@@ -470,9 +599,9 @@ def main():
         blocks = build_blocks(classified)
         print(f"✅ Grouped into {len(blocks)} category/subtype block(s).")
 
-        build_workbook(header, blocks, output_path, odoo)
+        build_workbook(header, blocks, output_path)
         print(f"✅ Wrote output workbook: {output_path}")
-    except (ExtractionError, GenerationError, OdooError) as e:
+    except (ExtractionError, GenerationError, OdooError, OverridesError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 

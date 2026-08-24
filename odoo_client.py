@@ -1,18 +1,26 @@
 """Minimal Odoo XML-RPC client for product lookups.
 
-Reads connection settings from .env (ODOO_URL, ODOO_DB, ODOO_USERNAME,
-ODOO_PASSWORD). Uses only the standard library (xmlrpc.client) - no new
+ODOO_URL/ODOO_DB always come from .env - the server and database are the
+same for everyone, so there's no reason to ask for them per-user. Username
+and password are different: OdooClient accepts them as explicit arguments
+(the GUI prompts for these via a login dialog rather than baking one
+shared login into .env) and only falls back to ODOO_USERNAME/ODOO_PASSWORD
+in .env if they aren't given - kept for CLI/scripting convenience, not
+used by the GUI. Uses only the standard library (xmlrpc.client) - no new
 dependency needed.
 """
 
 import xmlrpc.client
+
+from app_paths import app_path
 
 
 class OdooError(Exception):
     pass
 
 
-def _load_env(env_path=".env"):
+def _load_env(env_path=None):
+    env_path = env_path or app_path(".env")
     env = {}
     with open(env_path, encoding="utf-8") as f:
         for line in f:
@@ -25,15 +33,22 @@ def _load_env(env_path=".env"):
 
 
 class OdooClient:
-    def __init__(self, env_path=".env"):
+    def __init__(self, username=None, password=None, env_path=None):
+        env_path = env_path or app_path(".env")
         env = _load_env(env_path)
         try:
             url = env["ODOO_URL"]
             db = env["ODOO_DB"]
-            username = env["ODOO_USERNAME"]
-            password = env["ODOO_PASSWORD"]
         except KeyError as e:
             raise OdooError(f"Missing {e.args[0]} in {env_path}")
+
+        username = username or env.get("ODOO_USERNAME")
+        password = password or env.get("ODOO_PASSWORD")
+        if not username or not password:
+            raise OdooError(
+                "Odoo username/password not provided, and ODOO_USERNAME/"
+                f"ODOO_PASSWORD aren't set in {env_path} either."
+            )
 
         common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
         uid = common.authenticate(db, username, password, {})
@@ -59,51 +74,17 @@ class OdooClient:
         recs = self.execute("product.product", "read", ids, fields=["default_code", "name", "categ_id"])
         return {r["default_code"]: r for r in recs}
 
-    def lookup_contact_by_company_name(self, company_name):
-        """Find the company in res.partner matching `company_name` (a
-        contains/ilike search - PDF consignee names don't always match
-        Odoo's spelling exactly), and return its first *named* contact as
-        {"name", "phone"}, or None if no company match or no named
-        contact exists.
 
-        A trailing "." is stripped first, since PDF consignee names are
-        often written like "SPARTA SPA LTD." while Odoo has "Sparta Spa
-        LTD" with no trailing period.
-
-        A company's child_ids can include auto-generated address records
-        (type "invoice"/"delivery"/etc.) with no name of their own - e.g.
-        one real Odoo company had child_ids [invoice-address (name=False),
-        Scott Campbell (type=contact)]. Picking child_ids[0] blindly would
-        have returned the nameless address record, so this prefers
-        type="contact" records and falls back to any child with a name."""
-        search_name = company_name.strip()
-        if search_name.endswith("."):
-            search_name = search_name[:-1]
-        if not search_name:
-            return None
-
-        company_ids = self.execute(
-            "res.partner", "search",
-            [["name", "ilike", search_name], ["is_company", "=", True]],
-            limit=1,
-        )
-        if not company_ids:
-            return None
-
-        company = self.execute("res.partner", "read", company_ids, fields=["child_ids"])[0]
-        if not company["child_ids"]:
-            return None
-
-        children = self.execute(
-            "res.partner", "read", company["child_ids"],
-            fields=["name", "type", "phone", "mobile"],
-        )
-        named = [c for c in children if c["name"]]
-        if not named:
-            return None
-        contact_type = [c for c in named if c["type"] == "contact"]
-        child = contact_type[0] if contact_type else named[0]
-        return {
-            "name": child["name"],
-            "phone": child["phone"] or child["mobile"] or None,
-        }
+def prompt_login():
+    """CLI convenience: try ODOO_USERNAME/ODOO_PASSWORD from .env first
+    (unchanged behavior when they're set); if they're missing - the
+    normal case now that the GUI prompts for login instead of storing
+    them in .env - fall back to an interactive terminal prompt rather
+    than just failing."""
+    try:
+        return OdooClient()
+    except OdooError:
+        import getpass
+        username = input("Odoo username: ")
+        password = getpass.getpass("Odoo password: ")
+        return OdooClient(username=username, password=password)

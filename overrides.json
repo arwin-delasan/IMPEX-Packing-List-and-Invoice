@@ -1,0 +1,26 @@
+{
+  "M-SCRP-KEYCHAIN": {
+    "category": "Sauna Other Item",
+    "corrected_at": "2026-08-20T10:31:48",
+    "original_category": "(Uncategorized)",
+    "original_subtype": null,
+    "product_name": "Metal Scrap Keychain",
+    "subtype": null
+  },
+  "SAU-B-V2": {
+    "category": "Sauna Power Controller",
+    "corrected_at": "2026-08-20T10:31:26",
+    "original_category": "(Uncategorized)",
+    "original_subtype": null,
+    "product_name": "Saunova 2.0 Built-in",
+    "subtype": null
+  },
+  "SAU-UI-S": {
+    "category": "Sauna Power Controller",
+    "corrected_at": "2026-08-20T10:31:34",
+    "original_category": "(Uncategorized)",
+    "original_subtype": null,
+    "product_name": "Saunova Simple",
+    "subtype": null
+  }
+}
