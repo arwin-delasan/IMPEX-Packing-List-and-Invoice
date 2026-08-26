@@ -253,8 +253,14 @@ def parse_items_on_page(page):
 
     Mirrors pdf_parser.py's approach (repeated per-page header, shared
     Grand Total row on the final page) - see its parse_items_on_page for
-    the fuller rationale."""
-    words = page.extract_words(use_text_flow=True, keep_blank_chars=False, x_tolerance=1.5)
+    the fuller rationale. Not use_text_flow, for the same reason
+    proforma_parser.py and this module's own parse_header() aren't: a
+    value that wraps onto an extra line can land between that line's
+    "anchor" row and the rest of its own row in content-stream order,
+    which defeats cluster_rows' sequential top-proximity grouping.
+    Default extract_words sorts by (top, x0) instead, which groups rows
+    correctly regardless of stream order."""
+    words = page.extract_words(keep_blank_chars=False, x_tolerance=1.5)
     rows = cluster_rows(words)
 
     header_idx = grand_idx = None
@@ -276,7 +282,26 @@ def parse_items_on_page(page):
         start_idx += 1
 
     end_idx = grand_idx if grand_idx is not None else len(rows)
-    item_rows = [row["words"] for row in rows[start_idx:end_idx] if _is_item_row_start(row["words"])]
+
+    # A product code too long for its column wraps onto an extra line
+    # (e.g. "LED-SUPPLY-60-" / "V2"), which renders as its own row: a
+    # single word, sitting just below the row it belongs to and
+    # left-aligned to the same x0 as that row's code. Left unmerged, this
+    # breaks two things at once - the fragment row itself doesn't end in
+    # a number so it's dropped as "not an item row", *and* the row that
+    # was split loses its second half. Reattach it onto the code before
+    # classifying.
+    item_rows = []
+    for row in rows[start_idx:end_idx]:
+        if _is_item_row_start(row["words"]):
+            item_rows.append(row["words"])
+            continue
+        if len(row["words"]) == 1 and item_rows:
+            orphan = row["words"][0]
+            code_word = item_rows[-1][0]
+            if abs(orphan["x0"] - code_word["x0"]) < 5 and abs(orphan["top"] - code_word["top"]) < 15:
+                item_rows[-1][0] = {**code_word, "text": code_word["text"] + orphan["text"]}
+
     return item_rows, grand_total_words
 
 
