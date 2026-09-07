@@ -27,7 +27,7 @@ from generate_pl1 import (
     validate,
 )
 from generate_inv import apply_bella_vivo_billing, build_invoice_workbook, load_bella_vivo_prices
-from proforma_parser import parse_proforma_prices
+from proforma_parser import parse_proforma
 from odoo_client import OdooClient, OdooError, _load_env
 from categorize import UNCATEGORIZED, CATEGORY_ORDER
 from overrides import OverridesError, delete_override, load_overrides, set_overrides_bulk
@@ -300,6 +300,7 @@ class App:
         )
         if choice is None:
             return
+        currency = "USD"
         if choice == "Bella Vivo":
             price_lookup = load_bella_vivo_prices()
             header = apply_bella_vivo_billing(self._last_header)
@@ -312,16 +313,17 @@ class App:
             if not proforma_path:
                 return
             try:
-                price_lookup = parse_proforma_prices(proforma_path)
+                price_lookup, currency = parse_proforma(proforma_path)
             except ExtractionError as e:
                 messagebox.showerror("Pro-Forma Invoice extraction failed", str(e))
                 return
+            self.write_log(f"Read {len(price_lookup)} unit price(s) from the Pro-Forma Invoice ({currency}).")
             header = self._last_header
 
         self._generate_output(
             label="Invoice", suffix="Invoice",
             build_fn=build_invoice_workbook, output_desc="invoice",
-            header=header, extra_kwargs={"price_lookup": price_lookup},
+            header=header, extra_kwargs={"price_lookup": price_lookup, "currency": currency},
         )
 
     def _generate_output(self, label, suffix, build_fn, output_desc, header=None, extra_kwargs=None):

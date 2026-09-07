@@ -42,7 +42,7 @@ from generate_pl1 import (
 )
 from odoo_client import OdooError, prompt_login
 from overrides import OverridesError
-from proforma_parser import parse_proforma_prices
+from proforma_parser import parse_proforma
 from app_paths import app_path
 
 INV_REFERENCE_PATH = app_path("INV - Copy.xlsx")
@@ -101,11 +101,38 @@ REF_SUBTYPE_ROW = 28
 REF_GRANDTOTAL_ROW = 99
 
 
-def build_invoice_workbook(header, blocks, output_path, price_lookup=None):
+def lookup_price(price_lookup, code):
+    """Find `code`'s price, falling back to a case-insensitive match.
+
+    The same product is not always spelled with the same case in the two
+    documents - the China/SO 6773 packing list prints "Decal-4L" while
+    that shipment's Pro-Forma Invoice prints "DECAL-4L". Matched
+    case-sensitively, a real, known price is silently dropped and the
+    Unit Price cell ships blank. Codes are otherwise identical strings,
+    so folding case is safe: no two distinct SAWO codes differ only by
+    capitalization (checked across the Bella Vivo price list's 2268
+    codes - folding case yields no collisions).
+    """
+    price = price_lookup.get(code)
+    if price is not None:
+        return price
+    folded = code.casefold()
+    for known, known_price in price_lookup.items():
+        if known.casefold() == folded:
+            return known_price
+    return None
+
+
+def build_invoice_workbook(header, blocks, output_path, price_lookup=None, currency="USD"):
     """price_lookup: optional {code: price} dict (e.g. from
     load_bella_vivo_prices()). When given, Unit Price is filled in for any
     matching code; codes with no match are noted in the returned warnings
-    list and left blank, same as when price_lookup is None entirely."""
+    list and left blank, same as when price_lookup is None entirely.
+
+    currency: the code printed on the Grand Total row. Not always USD -
+    a Pro-Forma Invoice can be priced in EUR (see proforma_parser.
+    detect_currency), and printing those figures under a "USD" label
+    would misstate the invoice total."""
     warnings = []
     ref_wb = load_workbook(INV_REFERENCE_PATH)
     ref_ws = ref_wb[SHEET_NAME]
@@ -238,7 +265,7 @@ def build_invoice_workbook(header, blocks, output_path, price_lookup=None):
                     COL_TOTAL_PRICE: f"={unit_price_col}{row}*{qty_col}{row}",
                 }
                 if price_lookup is not None:
-                    price = price_lookup.get(it["external_code"])
+                    price = lookup_price(price_lookup, it["external_code"])
                     if price is not None:
                         vals[COL_UNIT_PRICE] = price
                     else:
@@ -267,7 +294,7 @@ def build_invoice_workbook(header, blocks, output_path, price_lookup=None):
     price_formula = "=SUM(" + ",".join(f"{total_price_col}{r}" for r in subtotal_rows) + ")"
     style_row(row, REF_GRANDTOTAL_ROW, {
         COL_NAME: "GRAND TOTAL:", COL_QTY: qty_formula,
-        COL_UNIT_PRICE: "USD", COL_TOTAL_PRICE: price_formula,
+        COL_UNIT_PRICE: currency, COL_TOTAL_PRICE: price_formula,
     })
     row += 1
     row += 2  # spacer before the signature block, mirroring generate_pl1.py
@@ -340,14 +367,18 @@ def main():
         blocks = build_blocks(classified)
         print(f"✅ Grouped into {len(blocks)} category/subtype block(s).")
 
+        currency = "USD"
         if bella_vivo:
             price_lookup = load_bella_vivo_prices()
             header = apply_bella_vivo_billing(header)
         elif proforma_path:
-            price_lookup = parse_proforma_prices(proforma_path)
+            price_lookup, currency = parse_proforma(proforma_path)
+            print(f"✅ Read {len(price_lookup)} unit price(s) from the Pro-Forma Invoice ({currency}).")
         else:
             price_lookup = None
-        price_warnings = build_invoice_workbook(header, blocks, output_path, price_lookup=price_lookup)
+        price_warnings = build_invoice_workbook(
+            header, blocks, output_path, price_lookup=price_lookup, currency=currency,
+        )
         for w in price_warnings:
             print(f"WARNING: {w}")
         print(f"✅ Wrote output workbook: {output_path}")
