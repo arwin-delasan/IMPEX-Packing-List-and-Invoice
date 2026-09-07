@@ -27,6 +27,13 @@ from generate_pl1 import (
     validate,
 )
 from generate_inv import apply_bella_vivo_billing, build_invoice_workbook, load_bella_vivo_prices
+from pricelist import (
+    PriceListError,
+    active_entry,
+    install_bella_vivo,
+    resolve_bella_vivo_path,
+    shared_dir,
+)
 from proforma_parser import parse_proforma
 from odoo_client import OdooClient, OdooError, _load_env
 from categorize import UNCATEGORIZED, CATEGORY_ORDER
@@ -85,6 +92,7 @@ def login_dialog(parent, odoo_url, odoo_db):
             password_entry.focus_set()
             return
         result["client"] = client
+        result["username"] = username
         dialog.destroy()
 
     btn_frame = tk.Frame(dialog)
@@ -103,7 +111,7 @@ def login_dialog(parent, odoo_url, odoo_db):
 
     dialog.grab_set()
     parent.wait_window(dialog)
-    return result["client"]
+    return result["client"], result.get("username", "")
 
 
 def ask_choice(parent, title, message, options):
@@ -166,7 +174,9 @@ class App:
             env = _load_env(app_path(".env"))
         except OSError:
             env = {}
-        self.odoo = login_dialog(root, env.get("ODOO_URL", "(not set in .env)"), env.get("ODOO_DB", "(not set in .env)"))
+        self.odoo, self.odoo_username = login_dialog(
+            root, env.get("ODOO_URL", "(not set in .env)"), env.get("ODOO_DB", "(not set in .env)")
+        )
         if self.odoo is None:
             return  # main() checks self.odoo and closes the app without starting mainloop
 
@@ -201,6 +211,11 @@ class App:
             frame, text="Manage Corrections...", height=2, command=self.open_manage_window
         )
         self.manage_btn.pack(fill="x", pady=(0, 10))
+
+        self.pricelist_btn = tk.Button(
+            frame, text="Bella Vivo Price List...", height=2, command=self.open_pricelist_window
+        )
+        self.pricelist_btn.pack(fill="x", pady=(0, 10))
 
         self.log = scrolledtext.ScrolledText(frame, height=16, state="disabled")
         self.log.pack(fill="both", expand=True)
@@ -302,7 +317,20 @@ class App:
             return
         currency = "USD"
         if choice == "Bella Vivo":
-            price_lookup = load_bella_vivo_prices()
+            pricelist_path, source = resolve_bella_vivo_path()
+            price_lookup = load_bella_vivo_prices(pricelist_path)
+            # Always name the edition used. If the shared folder is
+            # unreachable this silently falls back to the local copy,
+            # which may be superseded - the user needs to see that.
+            self.write_log(
+                f"Price list ({source}): {os.path.basename(pricelist_path)} "
+                f"- {len(price_lookup)} product code(s)."
+            )
+            if source == "local" and shared_dir():
+                self.write_log(
+                    "WARNING: shared price list unreachable - used the local copy, "
+                    "which may be out of date."
+                )
             header = apply_bella_vivo_billing(self._last_header)
         else:
             proforma_path = filedialog.askopenfilename(
@@ -617,6 +645,86 @@ class App:
         btns.grid(row=3, column=0, columnspan=2, pady=(10, 10))
         tk.Button(btns, text="OK", width=10, command=on_ok).pack(side="left", padx=6)
         tk.Button(btns, text="Cancel", width=10, command=dialog.destroy).pack(side="left", padx=6)
+
+    def open_pricelist_window(self):
+        """Show which Bella Vivo price list edition is in force, and adopt
+        a new one. Adopting copies the file to the shared folder and moves
+        the pointer; the superseded file is left in place (see
+        pricelist.py)."""
+        win = tk.Toplevel(self.root)
+        win.title("Bella Vivo Price List")
+        win.geometry("640x340")
+
+        body = tk.Frame(win, padx=14, pady=14)
+        body.pack(fill="both", expand=True)
+
+        status = tk.Label(body, justify="left", anchor="w", wraplength=600)
+        status.pack(fill="x")
+
+        def refresh():
+            path, source = resolve_bella_vivo_path()
+            entry = active_entry()
+            try:
+                count = len(load_bella_vivo_prices(path))
+            except Exception as e:
+                count = f"unreadable ({e})"
+            lines = [
+                f"In use:  {os.path.basename(path)}",
+                f"Source:  {'shared folder' if source == 'shared' else 'local copy next to the app'}",
+                f"Codes:   {count}",
+                f"Folder:  {shared_dir() or '(PRICELIST_PATH not set in .env)'}",
+            ]
+            if entry:
+                lines.append(
+                    f"Adopted: {entry.get('installed_at', '?')}"
+                    + (f" by {entry['installed_by']}" if entry.get("installed_by") else "")
+                )
+                if entry.get("supersedes"):
+                    lines.append(f"Replaced: {entry['supersedes']} (kept on disk)")
+            else:
+                lines.append("Adopted: never - still on the edition shipped with the app.")
+            if source == "local" and shared_dir():
+                lines.append(
+                    "\nWARNING: the shared folder is configured but unreachable, so this "
+                    "is the local copy and may be out of date."
+                )
+            status.configure(text="\n".join(lines))
+
+        refresh()
+
+        def upload():
+            src = filedialog.askopenfilename(
+                title="Choose the new Bella Vivo price list",
+                filetypes=[("Excel Workbook", "*.xlsx")], parent=win,
+            )
+            if not src:
+                return
+            # Validate and report before changing anything, so a wrong
+            # file is rejected rather than adopted and discovered later
+            # as an invoice full of blank Unit Prices.
+            try:
+                dest, count = install_bella_vivo(
+                    src, load_bella_vivo_prices, installed_by=self.odoo_username,
+                )
+            except PriceListError as e:
+                messagebox.showerror("Could not adopt this price list", str(e), parent=win)
+                return
+            refresh()
+            self.write_log(f"Adopted new Bella Vivo price list: {os.path.basename(dest)} ({count} codes).")
+            messagebox.showinfo(
+                "Price list updated",
+                f"{os.path.basename(dest)} is now the price list in use.\n\n"
+                f"{count} product codes.\n\n"
+                "Everyone's install picks it up on their next invoice. The previous "
+                "file is kept in the folder and simply no longer referenced.",
+                parent=win,
+            )
+
+        btns = tk.Frame(win)
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Button(btns, text="Upload New Price List...", command=upload).pack(side="left")
+        tk.Button(btns, text="Refresh", command=refresh).pack(side="left", padx=(6, 0))
+        tk.Button(btns, text="Close", command=win.destroy).pack(side="right")
 
     def open_manage_window(self):
         win = tk.Toplevel(self.root)

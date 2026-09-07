@@ -30,26 +30,12 @@ import json
 import os
 from datetime import datetime
 
-from app_paths import app_path
+from app_paths import app_path, env_value
 
 
-def _env_value(key, env_path=None):
-    """Read one KEY=value line from .env, or None if the file/key is
-    missing. Mirrors odoo_client.py's _load_env() parsing (# comments
-    stripped, surrounding quotes stripped) without importing an
-    Odoo-specific module for a generic concern."""
-    env_path = env_path or app_path(".env")
-    if not os.path.exists(env_path):
-        return None
-    with open(env_path, encoding="utf-8-sig") as f:  # -sig: strip a UTF-8 BOM if present
-        for line in f:
-            line = line.split("#", 1)[0].strip()
-            if not line or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            if k.strip() == key:
-                return v.strip().strip('"').strip("'")
-    return None
+# Shared with pricelist.py and kept importable under the old private
+# name so nothing that already calls _env_value() has to change.
+_env_value = env_value
 
 
 def _resolve_overrides_path():

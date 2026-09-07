@@ -18,6 +18,7 @@ Usage:
 """
 
 import math
+import os
 import sys
 
 from openpyxl import load_workbook, Workbook
@@ -44,6 +45,7 @@ from odoo_client import OdooError, prompt_login
 from overrides import OverridesError
 from proforma_parser import parse_proforma
 from app_paths import app_path
+from pricelist import resolve_bella_vivo_path
 
 INV_REFERENCE_PATH = app_path("INV - Copy.xlsx")
 SHEET_NAME = "summary"
@@ -51,6 +53,9 @@ SHEET_NAME = "summary"
 # Bella Vivo gets its own dedicated price list (2268 product codes, one
 # price each - verified no duplicates). Other customers' pricing comes
 # from a separate quote/proforma PDF instead (not wired up yet).
+# Fallback only. The edition actually in force is resolved at call time
+# by pricelist.resolve_bella_vivo_path(), so a new edition can be adopted
+# without editing this file - see pricelist.py.
 BELLA_VIVO_PRICELIST_PATH = app_path("BELLA VIVO PRICELIST-0125.xlsx")
 BELLA_VIVO_SHEET_NAME = "data"
 BELLA_VIVO_HEADER_ROW = 2  # "PRODUCT CATEGORY" / "PRODUCT CODE" / "BV PRICE USD"
@@ -71,11 +76,18 @@ def apply_bella_vivo_billing(header):
     return {**header, **BELLA_VIVO_BILLING}
 
 
-def load_bella_vivo_prices(path=BELLA_VIVO_PRICELIST_PATH):
+def load_bella_vivo_prices(path=None):
     """Return {code: price} for every row in the Bella Vivo price list.
+
+    With no path, uses whichever edition is currently in force (see
+    pricelist.resolve_bella_vivo_path). Callers that need to know *which*
+    file that was - to show it to the user, or to validate a candidate
+    file before adopting it - should pass the path explicitly.
     Product codes are stored as a mix of int (e.g. 304) and str (e.g.
     "221-THD") in the source file - normalized to str here so they match
     the string-typed external_code values extracted from the PDF."""
+    if path is None:
+        path, _source = resolve_bella_vivo_path()
     wb = load_workbook(path, data_only=True)
     ws = wb[BELLA_VIVO_SHEET_NAME]
     prices = {}
@@ -369,7 +381,10 @@ def main():
 
         currency = "USD"
         if bella_vivo:
-            price_lookup = load_bella_vivo_prices()
+            pricelist_path, source = resolve_bella_vivo_path()
+            price_lookup = load_bella_vivo_prices(pricelist_path)
+            print(f"✅ Price list ({source}): {os.path.basename(pricelist_path)} "
+                  f"- {len(price_lookup)} product code(s).")
             header = apply_bella_vivo_billing(header)
         elif proforma_path:
             price_lookup, currency = parse_proforma(proforma_path)
