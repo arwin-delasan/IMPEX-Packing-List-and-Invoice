@@ -11,6 +11,10 @@ import pdfplumber
 
 UM_CODES = ("BX", "UN", "PC", "RL", "ST", "BOT", "PL", "PK", "SET")
 
+# Qty is the right-most column; every other token in an item row ends by
+# x1 ~533 (CBM), so this cleanly isolates it - see classify_item_row.
+QTY_COLUMN_MIN_X = 540
+
 GRAND_TOTAL_ANCHORS = {
     "packages": 365,
     "net_weight": 420,
@@ -116,6 +120,9 @@ def classify_item_row(words):
     Code, Qty, Description..., UM, Gross Weight, CBM, Net Weight) rather than
     by x-position ranges, because long descriptions in this PDF visually
     overlap the UM/Packages columns when they don't wrap to a second line.
+    The one exception is the Qty column, which is found by x-position -
+    stream order alone can't say where a multi-token External Code ends
+    and Qty begins, and nothing else in the row reaches that far right.
 
     Net Weight, Gross Weight, and CBM are always the row's last three
     tokens, and the UM code is always the token immediately before them -
@@ -143,11 +150,22 @@ def classify_item_row(words):
             packages = int(texts[i].replace(",", ""))
             i += 1
 
-        external_code = texts[i]
-        i += 1
+        # An External Code can contain a literal space (e.g.
+        # "STP-GASKET 6H.E."), which extract_words returns as two
+        # separate tokens - so the code is not always exactly one token.
+        # Assuming it was made Qty read the code's second half instead
+        # and fail the whole extraction. Qty is the only field rendered
+        # in the far-right Qty column, so it is located by x-position
+        # and everything between Packages and it is the code.
+        qty_idx = next((j for j in range(i, n) if words[j]["x0"] >= QTY_COLUMN_MIN_X), None)
+        if qty_idx is None:
+            fail(f"Could not locate a Qty column value in row: {texts}")
+        if qty_idx == i:
+            fail(f"Row has no External Code between Packages and Qty: {texts}")
 
-        qty = int(texts[i].replace(",", ""))
-        i += 1
+        external_code = " ".join(texts[i:qty_idx])
+        qty = int(texts[qty_idx].replace(",", ""))
+        i = qty_idx + 1
     except (ValueError, IndexError):
         fail(f"Could not parse External Code / Qty / Packages in row: {texts}")
 
