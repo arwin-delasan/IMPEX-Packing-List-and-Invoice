@@ -11,17 +11,24 @@ import pdfplumber
 
 UM_CODES = ("BX", "UN", "PC", "RL", "ST", "BOT", "PL", "PK", "SET")
 
-# Qty is the right-most column; every other token in an item row ends by
-# x1 ~533 (CBM), so this cleanly isolates it - see classify_item_row.
-QTY_COLUMN_MIN_X = 540
+# Right-hand column labels, and the left-hand ones that share their
+# lines. Header fields are found by locating these labels rather than by
+# counting lines - see parse_header.
+RIGHT_LABELS = [
+    ("date", "Date:"),
+    ("invoice_no", "Invoice No.:"),
+    ("container_no", "Container No.:"),
+    ("seal_no", "Seal No.:"),
+    ("destination", "Destination:"),
+    ("payment_terms", "Payment Terms:"),
+]
 
-GRAND_TOTAL_ANCHORS = {
-    "packages": 365,
-    "net_weight": 420,
-    "gross_weight": 465,
-    "cbm": 513,
-    "qty": 550,
-}
+LEFT_LABELS = [
+    ("sold_to_company", "Sold To:"),
+    ("tel_no", "Tel. No.:"),
+    ("fax_no", "Fax No.:"),
+    ("attn", "ATTN.:"),
+]
 
 
 class ExtractionError(Exception):
@@ -45,50 +52,78 @@ def reformat_date(text):
 # ---------------------------------------------------------------------------
 
 def parse_header(text):
-    lines = text.split("\n")
+    """Read the header block by locating each field's own label, rather
+    than by counting lines from "Sold To:".
 
-    def find_line(label):
-        for l in lines:
-            if label in l:
-                return l
-        fail(f"Header label not found in PDF: {label!r}")
+    The previous version took a fixed slice of exactly seven lines after
+    "Sold To:" and required each one to match its own regex, so any
+    variation in the block's shape - a customer with two or four address
+    lines instead of three, a missing Fax No., an extra field - shifted
+    every following line and failed the whole extraction. Labels are
+    stable where line offsets aren't, so each field is found wherever it
+    actually sits, and the optional ones (Fax No., ATTN., Payment Terms)
+    are simply left blank when absent instead of aborting.
+    """
+    lines = text.splitlines()
 
-    l1 = find_line("Sold To:")
-    m1 = re.search(r"Sold To:\s*(.*?)\s+Date:\s*(.*)", l1)
-    if not m1:
-        fail(f"Could not parse Sold To / Date line: {l1!r}")
+    start = next((i for i, l in enumerate(lines) if "Sold To:" in l), None)
+    if start is None:
+        fail("Header label not found in PDF: 'Sold To:'")
+    # The item table's own column header ends the block - the same
+    # boundary parse_items_on_page() keys off, and exact regardless of
+    # how tall the header happens to be.
+    end = next(
+        (i for i in range(start + 1, len(lines)) if "External" in lines[i] and "Code" in lines[i]),
+        len(lines),
+    )
 
-    idx = lines.index(l1)
-    if idx + 7 >= len(lines):
-        fail("PDF header block is shorter than expected.")
-    l2, l3, l4, l5, l6, l7, l8 = lines[idx + 1: idx + 8]
+    right_fields = {}
+    right_offsets = {}
+    left_parts = []
+    for offset, line in enumerate(lines[start:end]):
+        rest = line
+        for key, label in RIGHT_LABELS:
+            pos = rest.find(label)
+            if pos != -1:
+                right_fields[key] = rest[pos + len(label):].strip()
+                right_offsets[key] = offset
+                rest = rest[:pos]
+                break
+        left_parts.append((offset, rest.strip()))
 
-    m2 = re.search(r"^(.*?)\s*Invoice No\.:\s*(.*)$", l2)
-    m3 = re.search(r"^(.*?)\s*Container No\.:\s*(.*)$", l3)
-    m4 = re.search(r"^(.*?)\s*Seal No\.:\s*(.*)$", l4)
-    m5 = re.search(r"Destination:\s*(.*)$", l5)
-    m6 = re.search(r"^Tel\. No\.:\s*(.*?)\s+Payment Terms:\s*(.*)$", l6)
-    m7 = re.search(r"^Fax No\.:\s*(.*)$", l7)
-    m8 = re.search(r"^ATTN\.:\s*(.*)$", l8)
+    left_fields = {}
+    address_candidates = []
+    for offset, part in left_parts:
+        label_match = next(((k, l) for k, l in LEFT_LABELS if part.startswith(l)), None)
+        if label_match:
+            key, label = label_match
+            left_fields[key] = part[len(label):].strip()
+        elif part:
+            address_candidates.append((offset, part))
 
-    for m, src in ((m2, l2), (m3, l3), (m4, l4), (m5, l5), (m6, l6), (m7, l7), (m8, l8)):
-        if not m:
-            fail(f"Could not parse header line: {src!r}")
+    for key in ("date", "invoice_no", "container_no", "seal_no", "destination"):
+        if key not in right_fields:
+            fail(f"Header label not found in PDF: {dict(RIGHT_LABELS)[key]!r}")
+    for key in ("sold_to_company", "tel_no"):
+        if key not in left_fields:
+            fail(f"Header label not found in PDF: {dict(LEFT_LABELS)[key]!r}")
 
-    address_lines = [g.strip() for g in (m2.group(1), m3.group(1), m4.group(1)) if g.strip()]
+    # The address occupies the unlabelled left-hand text above the
+    # Destination line - however many lines that turns out to be.
+    address_lines = [p for offset, p in address_candidates if offset < right_offsets["destination"]]
 
     return {
-        "sold_to_company": m1.group(1).strip(),
+        "sold_to_company": left_fields["sold_to_company"],
         "sold_to_address": address_lines,
-        "date": reformat_date(m1.group(2).strip()),
-        "invoice_no": m2.group(2).strip(),
-        "container_no": m3.group(2).strip(),
-        "seal_no": m4.group(2).strip(),
-        "destination": m5.group(1).strip(),
-        "tel_no": m6.group(1).strip(),
-        "payment_terms": m6.group(2).strip(),
-        "fax_no": m7.group(1).strip(),
-        "attn": m8.group(1).strip(),
+        "date": reformat_date(right_fields["date"]),
+        "invoice_no": right_fields["invoice_no"],
+        "container_no": right_fields["container_no"],
+        "seal_no": right_fields["seal_no"],
+        "destination": right_fields["destination"],
+        "tel_no": left_fields["tel_no"],
+        "payment_terms": right_fields.get("payment_terms", ""),
+        "fax_no": left_fields.get("fax_no", ""),
+        "attn": left_fields.get("attn", ""),
     }
 
 
@@ -113,7 +148,11 @@ def cluster_rows(words, tol=2.5):
     return rows
 
 
-def classify_item_row(words):
+def _texts(row):
+    return [w["text"] for w in row["words"]]
+
+
+def classify_item_row(words, qty_min_x):
     """Classify one row's words into item fields.
 
     Columns are identified by their fixed stream order (Packages, External
@@ -157,7 +196,7 @@ def classify_item_row(words):
         # and fail the whole extraction. Qty is the only field rendered
         # in the far-right Qty column, so it is located by x-position
         # and everything between Packages and it is the code.
-        qty_idx = next((j for j in range(i, n) if words[j]["x0"] >= QTY_COLUMN_MIN_X), None)
+        qty_idx = next((j for j in range(i, n) if words[j]["x0"] >= qty_min_x), None)
         if qty_idx is None:
             fail(f"Could not locate a Qty column value in row: {texts}")
         if qty_idx == i:
@@ -209,13 +248,74 @@ def classify_item_row(words):
     }
 
 
-def parse_grand_total(words):
+def column_anchors(page):
+    """Measure the numeric columns' x centres off the item table's own
+    column header row, instead of hard-coding them.
+
+    parse_grand_total() reads that row by nearest-anchor matching, which
+    always returns *some* column - so hard-coded anchors don't fail on a
+    differently sized or differently margined rendering of this
+    template, they silently map values onto the wrong fields. Anchors
+    measured from the header that's actually on the page stay correct at
+    any page size or scale.
+
+    Returns None when the header row isn't on this page (a continuation
+    page carrying no item table), leaving the caller to reuse the last
+    page's measurements.
+    """
+    rows = cluster_rows(page.extract_words(keep_blank_chars=False, x_tolerance=1.5))
+    header = next(
+        (r for r in rows if "External" in _texts(r) and "Code" in _texts(r)),
+        None,
+    )
+    if header is None:
+        return None
+
+    # "Number of / Packages", "Net / Weight" and "Gross / Weight" wrap
+    # onto a second header line, which carries those three columns' real
+    # centres; the single-word CBM and Qty stay on the first.
+    wrapped = next(
+        (r for r in rows if r["top"] > header["top"] and _texts(r)[:1] == ["Packages"]),
+        None,
+    )
+
+    def centre(row, text, occurrence=0):
+        if row is None:
+            return None
+        hits = [w for w in row["words"] if w["text"] == text]
+        if len(hits) <= occurrence:
+            return None
+        return (hits[occurrence]["x0"] + hits[occurrence]["x1"]) / 2
+
+    anchors = {
+        "packages": centre(wrapped, "Packages") or centre(header, "Number"),
+        "net_weight": centre(wrapped, "Weight", 0) or centre(header, "Net"),
+        "gross_weight": centre(wrapped, "Weight", 1) or centre(header, "Gross"),
+        "cbm": centre(header, "CBM"),
+        "qty": centre(header, "Qty"),
+    }
+    if any(v is None for v in anchors.values()):
+        return None
+    return anchors
+
+
+def qty_column_min_x(anchors):
+    """Left edge of the Qty column, midway between the CBM and Qty header
+    centres. Qty is the only field rendered that far right (see
+    classify_item_row); measured against every sample, CBM values reach
+    x0 518 at most and Qty values start at x0 547, so the midpoint sits
+    well inside the gap - and it tracks the page instead of assuming
+    one."""
+    return (anchors["cbm"] + anchors["qty"]) / 2
+
+
+def parse_grand_total(words, anchors):
     numeric_words = [w for w in words if re.fullmatch(r"-?[\d,]*\.?\d+", w["text"])]
     result = {}
     for w in numeric_words:
-        key = min(GRAND_TOTAL_ANCHORS, key=lambda k: abs(GRAND_TOTAL_ANCHORS[k] - w["x0"]))
+        key = min(anchors, key=lambda k: abs(anchors[k] - w["x0"]))
         result[key] = parse_number(w["text"])
-    missing = set(GRAND_TOTAL_ANCHORS) - result.keys()
+    missing = set(anchors) - result.keys()
     if missing:
         fail(f"Grand Total row missing values for: {sorted(missing)}")
     result["qty"] = int(result["qty"])
@@ -229,7 +329,8 @@ def _is_item_row_start(words):
 
 
 def parse_items_on_page(page):
-    """Return (item_row_word_lists, grand_total_words_or_None) for one page.
+    """Return (item_row_word_lists, grand_total_words_or_None, anchors_or_None)
+    for one page.
 
     Multi-page packing lists repeat the item-table header ("External Code
     / Description / UM / ...") on every page. If a page has no such header
@@ -240,6 +341,7 @@ def parse_items_on_page(page):
     mistaken for an item row, since the only real signal for "is this an
     item row" is its first word looking like a Packages value.
     """
+    anchors = column_anchors(page)
     words = page.extract_words(use_text_flow=True, keep_blank_chars=False, x_tolerance=1.5)
     rows = cluster_rows(words)
 
@@ -255,7 +357,7 @@ def parse_items_on_page(page):
     grand_total_words = rows[grand_idx]["words"] if grand_idx is not None else None
 
     if header_idx is None:
-        return [], grand_total_words
+        return [], grand_total_words, anchors
 
     # The column header wraps onto a second PDF line (e.g. "Number of
     # Packages" / "Net Weight" continue below "External Code Description
@@ -267,7 +369,7 @@ def parse_items_on_page(page):
 
     end_idx = grand_idx if grand_idx is not None else len(rows)
     item_rows = [row["words"] for row in rows[start_idx:end_idx] if _is_item_row_start(row["words"])]
-    return item_rows, grand_total_words
+    return item_rows, grand_total_words, anchors
 
 
 def parse_items(pdf):
@@ -275,23 +377,42 @@ def parse_items(pdf):
     found - packing lists with enough items span multiple PDF pages, each
     repeating the item-table header but sharing one Grand Total row on the
     final page."""
-    all_item_rows = []
+    all_item_rows = []  # (page number, row words)
     grand_total_words = None
+    grand_total_page = None
+    anchors = None
 
-    for page in pdf.pages:
-        item_rows, page_grand_total_words = parse_items_on_page(page)
-        all_item_rows.extend(item_rows)
+    for page_no, page in enumerate(pdf.pages, start=1):
+        item_rows, page_grand_total_words, page_anchors = parse_items_on_page(page)
+        if page_anchors is not None:
+            anchors = page_anchors
+        all_item_rows.extend((page_no, words) for words in item_rows)
         if page_grand_total_words is not None:
             grand_total_words = page_grand_total_words
+            grand_total_page = page_no
             break
 
     if not all_item_rows:
         fail("Could not locate item table header row ('External Code') in PDF.")
     if grand_total_words is None:
         fail("Could not locate 'Grand Total' row in PDF.")
+    if anchors is None:
+        fail("Could not measure the item table's column positions from its header row.")
 
-    items = [classify_item_row(words) for words in all_item_rows]
-    grand_total = parse_grand_total(grand_total_words)
+    # Where a row fails to parse, say which page and how far down it sits -
+    # the token dump alone doesn't locate it in a 176-row, multi-page list.
+    qty_min_x = qty_column_min_x(anchors)
+    items = []
+    for page_no, words in all_item_rows:
+        try:
+            items.append(classify_item_row(words, qty_min_x))
+        except ExtractionError as e:
+            fail(f"{e} (page {page_no}, row top {words[0]['top']:.0f})")
+
+    try:
+        grand_total = parse_grand_total(grand_total_words, anchors)
+    except ExtractionError as e:
+        fail(f"{e} (page {grand_total_page})")
     return items, grand_total
 
 

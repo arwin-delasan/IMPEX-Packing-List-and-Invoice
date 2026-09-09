@@ -1,0 +1,110 @@
+{
+  "Australia 07-20-2026 Packing list REV.1.pdf": {
+    "grand_total": {
+      "cbm": 30.587,
+      "gross_weight": 6150.47,
+      "net_weight": 5315.25,
+      "packages": 131,
+      "qty": 802
+    },
+    "items": 47,
+    "sold_to_company": "AUSTRALIAN SAUNA & STEAM",
+    "template": "Email PDF"
+  },
+  "Canada 08-10-2026 Packing list REV.1.pdf": {
+    "grand_total": {
+      "cbm": 61.669,
+      "gross_weight": 10107.12,
+      "net_weight": 8865.06,
+      "packages": 383,
+      "qty": 2024
+    },
+    "items": 176,
+    "sold_to_company": "BSAUNAS - CANADA",
+    "template": "Email PDF"
+  },
+  "China 09-04-2026 Packing list REV.1.pdf": {
+    "grand_total": {
+      "cbm": 30.932,
+      "gross_weight": 4456.19,
+      "net_weight": 3707.01,
+      "packages": 442,
+      "qty": 1898
+    },
+    "items": 115,
+    "sold_to_company": "SMART CONSULT SOLUTIONS IS COZUMLER",
+    "template": "Email PDF"
+  },
+  "Holland 07-13-2026 Packing list REV.1.pdf": {
+    "grand_total": {
+      "cbm": 64.908,
+      "gross_weight": 16179.05,
+      "net_weight": 17739.15,
+      "packages": 479,
+      "qty": 2331
+    },
+    "items": 119,
+    "sold_to_company": "SAWO NORDIC",
+    "template": "Email PDF"
+  },
+  "Indonesia 08-18-2026 Odoo Packing list.pdf": {
+    "grand_total": {
+      "cbm": 0.311,
+      "gross_weight": 37.26,
+      "net_weight": 29.72,
+      "packages": 8,
+      "qty": 26
+    },
+    "items": 8,
+    "sold_to_company": "ERWIN TANUDJAJA",
+    "template": "Odoo PDF"
+  },
+  "Israel 08-12-2026 Packing list1.pdf": {
+    "grand_total": {
+      "cbm": 23.694,
+      "gross_weight": 3253.03,
+      "net_weight": 2185.74,
+      "packages": 7,
+      "qty": 95
+    },
+    "items": 34,
+    "sold_to_company": "SPARTA SPA LTD.",
+    "template": "Email PDF"
+  },
+  "Japan 07-24-2026 Odoo Packing list.pdf": {
+    "grand_total": {
+      "cbm": 0.608,
+      "gross_weight": 38.61,
+      "net_weight": 20.97,
+      "packages": 5,
+      "qty": 11
+    },
+    "items": 5,
+    "sold_to_company": "BOULOGNE CO., LTD",
+    "template": "Odoo PDF"
+  },
+  "New Zealand 09-03-2026 Packing list.pdf": {
+    "grand_total": {
+      "cbm": 28.561,
+      "gross_weight": 7614.8,
+      "net_weight": 7445.69,
+      "packages": 105,
+      "qty": 1930
+    },
+    "items": 61,
+    "sold_to_company": "THE SAUNA PEOPLE COMPANY LTD",
+    "template": "Email PDF"
+  },
+  "Singapore 08-25-2026 Odoo Packing list.pdf": {
+    "grand_total": {
+      "cbm": 0.086,
+      "gross_weight": 10.65,
+      "net_weight": 9.63,
+      "packages": 8,
+      "qty": 18
+    },
+    "items": 8,
+    "sold_to_company": "STEAMSAUNA",
+    "template": "Odoo PDF"
+  }
+}

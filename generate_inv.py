@@ -28,8 +28,7 @@ from openpyxl.worksheet.properties import PageSetupProperties
 from openpyxl.styles import Border
 
 from pdf_parser import ExtractionError
-from pdf_parser import extract_pdf as custom_extract_pdf
-from odoo_pdf_parser import extract_pdf as odoo_extract_pdf
+from packing_list_pdf import extract_pdf
 from generate_pl1 import (
     GenerationError,
     ROW_HEIGHT_PER_LINE,
@@ -360,10 +359,14 @@ def main():
         sys.exit(1)
 
     pdf_path, output_path = argv
-    extract_pdf = odoo_extract_pdf if odoo_pdf else custom_extract_pdf
 
     try:
-        header, items, grand_total = extract_pdf(pdf_path)
+        # --odoo still forces that template; without it the file itself
+        # decides (see packing_list_pdf).
+        header, items, grand_total, template = extract_pdf(
+            pdf_path, template="Odoo PDF" if odoo_pdf else None
+        )
+        print(f"✅ Detected template: {template}.")
         print(f"✅ Extracted header block and {len(items)} line items from PDF.")
         for w in um_warnings(items):
             print(f"WARNING: {w}")

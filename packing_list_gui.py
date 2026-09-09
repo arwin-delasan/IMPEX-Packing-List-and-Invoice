@@ -16,8 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from pdf_parser import ExtractionError
-from pdf_parser import extract_pdf as extract_pdf_custom
-from odoo_pdf_parser import extract_pdf as extract_pdf_odoo
+from packing_list_pdf import extract_pdf
 from generate_pl1 import (
     GenerationError,
     build_blocks,
@@ -239,29 +238,21 @@ class App:
         if not pdf_path:
             return
 
-        # Two real, differently-laid-out packing-list templates exist -
-        # the original custom one (emailed as an attachment), and one
-        # rendered by Odoo's own report engine (different header layout,
-        # different item-table column order) - so ask which extractor to
-        # use rather than guessing.
-        choice = ask_choice(
-            self.root, "PDF format", "Which kind of Packing List PDF is this?",
-            ["Odoo PDF", "Email PDF"],
-        )
-        if choice is None:
-            return
-        extract_pdf = extract_pdf_odoo if choice == "Odoo PDF" else extract_pdf_custom
-
         self.clear_log()
         self.choose_btn.configure(state="disabled")
         self.packing_list_btn.configure(state="disabled")
         self.invoice_btn.configure(state="disabled")
-        threading.Thread(target=self._run_flow, args=(pdf_path, extract_pdf), daemon=True).start()
+        threading.Thread(target=self._run_flow, args=(pdf_path,), daemon=True).start()
 
-    def _run_flow(self, pdf_path, extract_pdf):
+    def _run_flow(self, pdf_path):
         try:
             self.root.after(0, self.write_log, f"Reading PDF: {pdf_path}")
-            header, items, grand_total = extract_pdf(pdf_path)
+            # Which of the two packing-list templates this is gets worked
+            # out from the file itself (see packing_list_pdf) rather than
+            # asked - picking wrong only ever produced the other parser's
+            # confusing token dump.
+            header, items, grand_total, template = extract_pdf(pdf_path)
+            self.root.after(0, self.write_log, f"Detected template: {template}.")
             self.root.after(0, self.write_log, f"Extracted header block and {len(items)} line items.")
             for w in um_warnings(items):
                 self.root.after(0, self.write_log, f"WARNING: {w}")
@@ -271,12 +262,23 @@ class App:
                 self.root.after(0, self.write_log, f"WARNING: {w}")
             self.root.after(0, self.write_log, f"Classified {len(classified)} items ({len(warnings)} warning(s)).")
 
+            # Totals that don't reconcile mean the extraction probably
+            # misread the table, but that never blocks generation: a
+            # workbook with a few wrong figures is something the operator
+            # can fix in Excel, whereas no workbook at all leaves them
+            # re-keying the whole list by hand. So it's reported loudly
+            # and the flow carries on.
             totals_warnings = validate(items, grand_total)
-            if not totals_warnings:
-                self.root.after(0, self.write_log, "Validation passed: extracted totals reconcile with PDF Grand Total.")
-            else:
+            if totals_warnings:
                 for w in totals_warnings:
                     self.root.after(0, self.write_log, f"WARNING: {w}")
+                self.root.after(
+                    0, self.write_log,
+                    "Validation FAILED — generating anyway; check the figures above "
+                    "against the PDF and correct them in the output.",
+                )
+            else:
+                self.root.after(0, self.write_log, "Validation passed: extracted totals reconcile with PDF Grand Total.")
 
             self._last_pdf_path = pdf_path
             self._last_header = header
