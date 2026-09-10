@@ -11,6 +11,8 @@ re-classifying the PDF for each output.
 """
 
 import os
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -22,6 +24,7 @@ from generate_pl1 import (
     build_blocks,
     build_workbook,
     classify_items,
+    format_package_label,
     um_warnings,
     validate,
 )
@@ -136,6 +139,74 @@ def ask_choice(parent, title, message, options):
 
     for option in options:
         tk.Button(btn_frame, text=option, width=14, command=lambda v=option: choose(v)).pack(side="left", padx=6)
+
+    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    dialog.update_idletasks()
+    x = parent.winfo_rootx() + (parent.winfo_width() - dialog.winfo_width()) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - dialog.winfo_height()) // 2
+    dialog.geometry(f"+{x}+{y}")
+
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result["value"]
+
+
+def ask_package_counts(parent):
+    """Ask how many of each container type this LCL shipment ships as.
+    Returns {"boxes": n, "pallets": n, "crates": n}, or None if cancelled.
+    Types left at 0 simply don't appear on the packing list."""
+    result = {"value": None}
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("Number of packages")
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+
+    tk.Label(
+        dialog,
+        text="How many of each does this shipment ship as?\n"
+             "Leave a type at 0 and it won't be listed.",
+        justify="left", wraplength=340,
+    ).pack(padx=20, pady=(16, 8))
+
+    form = tk.Frame(dialog)
+    form.pack(padx=20)
+    entries = {}
+    for i, (key, label) in enumerate((("boxes", "Boxes"), ("pallets", "Pallets"), ("crates", "Crates"))):
+        tk.Label(form, text=label, width=10, anchor="w").grid(row=i, column=0, pady=3)
+        entry = tk.Entry(form, width=10)
+        entry.insert(0, "0")
+        entry.grid(row=i, column=1, pady=3)
+        entries[key] = entry
+    entries["boxes"].focus_set()
+
+    error = tk.Label(dialog, text="", fg="red", wraplength=340, justify="left")
+    error.pack(padx=20, pady=(6, 0))
+
+    def on_ok(event=None):
+        counts = {}
+        for key, entry in entries.items():
+            text = entry.get().strip() or "0"
+            try:
+                value = int(text)
+            except ValueError:
+                error.configure(text=f"{key.capitalize()}: '{text}' is not a whole number.")
+                return
+            if value < 0:
+                error.configure(text=f"{key.capitalize()} can't be negative.")
+                return
+            counts[key] = value
+        if not any(counts.values()):
+            error.configure(text="Enter at least one package.")
+            return
+        result["value"] = counts
+        dialog.destroy()
+
+    btns = tk.Frame(dialog)
+    btns.pack(padx=20, pady=(10, 16))
+    tk.Button(btns, text="OK", width=12, command=on_ok).pack(side="left", padx=6)
+    tk.Button(btns, text="Cancel", width=12, command=dialog.destroy).pack(side="left", padx=6)
+    dialog.bind("<Return>", on_ok)
 
     dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
     dialog.update_idletasks()
@@ -303,9 +374,38 @@ class App:
             self.root.after(0, lambda: self.choose_btn.configure(state="normal"))
 
     def generate_packing_list(self):
+        # FCL ships as one sealed container, so its grand total is just
+        # "Packages"; LCL is listed per container type, which only the user
+        # knows - nothing in the source PDF states it.
+        mode = ask_choice(
+            self.root, "Shipment mode", "Is this an FCL (full container load) shipment?",
+            ["FCL", "LCL"],
+        )
+        if mode is None:
+            return
+        if mode == "FCL":
+            package_label = format_package_label(True)
+            package_breakdown = False  # keep the summed-from-subtotals formula
+        else:
+            counts = ask_package_counts(self.root)
+            if counts is None:
+                return
+            package_label = format_package_label(False, counts)
+            # The counts given ARE the package total - they replace the
+            # Grand Total figure entirely, not just its unit.
+            package_breakdown = True
+            pdf_total = (self._last_grand_total or {}).get("packages")
+            if pdf_total is not None and sum(counts.values()) != pdf_total:
+                self.write_log(
+                    f"WARNING: entered package counts total {sum(counts.values())}, "
+                    f"but the PDF Grand Total says {pdf_total}."
+                )
+        self.write_log(f"Grand Total packages: {package_label.replace(chr(10), ' + ')}")
+
         self._generate_output(
             label="Packing List", suffix="Packing List",
             build_fn=build_workbook, output_desc="categorized packing list",
+            extra_kwargs={"package_label": package_label, "package_breakdown": package_breakdown},
         )
 
     def generate_invoice(self):
@@ -390,7 +490,7 @@ class App:
             for w in result or []:  # e.g. codes missing from a price list
                 self.root.after(0, self.write_log, f"WARNING: {w}")
             self.root.after(0, self.write_log, f"Wrote {label.lower()}: {output_path}")
-            self.root.after(0, messagebox.showinfo, "Done", f"{label} generated.\n\nSaved to:\n{output_path}")
+            self.root.after(0, self._finish_output, label, output_path)
         except (ExtractionError, GenerationError, OdooError, OverridesError) as e:
             self.root.after(0, self.write_log, f"ERROR: {e}")
             self.root.after(0, messagebox.showerror, "Generation failed", str(e))
@@ -400,6 +500,27 @@ class App:
         finally:
             self.root.after(0, lambda: self.packing_list_btn.configure(state="normal"))
             self.root.after(0, lambda: self.invoice_btn.configure(state="normal"))
+
+    def _finish_output(self, label, output_path):
+        """Announce the finished file and open it, so it doesn't have to be
+        hunted down in the folder it was saved to."""
+        opened = self.open_file(output_path)
+        note = "" if opened else "\n\n(Couldn't open it automatically - open it from the folder above.)"
+        messagebox.showinfo("Done", f"{label} generated.\n\nSaved to:\n{output_path}{note}")
+
+    def open_file(self, path):
+        """Hand a file to whatever the OS opens .xlsx with. Returns False if
+        that failed - a generated file we can't launch is still a generated
+        file, so this never becomes a generation error."""
+        try:
+            if hasattr(os, "startfile"):  # Windows
+                os.startfile(path)
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
+            return True
+        except Exception as e:
+            self.write_log(f"WARNING: couldn't open {os.path.basename(path)} automatically: {e}")
+            return False
 
     def open_review_window(self):
         if not self._last_classified:

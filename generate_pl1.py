@@ -35,7 +35,7 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
-from openpyxl.styles import Border
+from openpyxl.styles import Alignment, Border
 
 from pdf_parser import ExtractionError
 from packing_list_pdf import extract_pdf
@@ -372,7 +372,45 @@ def _inject_signature_shape(output_path, anchor_row, from_col, from_col_off, wid
     os.replace(tmp_path, output_path)
 
 
-def build_workbook(header, blocks, output_path):
+# Package-type labels for the units row under the GRAND TOTAL, in the order
+# they're printed. FCL shipments aren't broken down by container type at all
+# (see format_package_label).
+PACKAGE_TYPES = (("boxes", "box", "boxes"),
+                 ("pallets", "pallet", "pallets"),
+                 ("crates", "crate", "crates"))
+
+
+def format_package_label(fcl, counts=None):
+    """The text under the GRAND TOTAL package count.
+
+    FCL ships as one sealed container, so the breakdown by container type
+    isn't meaningful - it's just "Packages". Otherwise the user gives a
+    count per container type and we list only the types actually present,
+    one per line (a zero count prints nothing)."""
+    if fcl:
+        return "packages"
+    counts = counts or {}
+    lines = []
+    for key, singular, plural in PACKAGE_TYPES:
+        n = int(counts.get(key) or 0)
+        if n > 0:
+            lines.append(f"{n} {singular if n == 1 else plural}")
+    # Nothing entered - say nothing rather than assert a container type the
+    # source never stated.
+    return "\n".join(lines)
+
+
+def _wrap(cell):
+    """Turn on wrapping (and centre the text) without disturbing the rest of
+    a style copied from the reference file."""
+    base = cell.alignment
+    cell.alignment = Alignment(
+        horizontal=base.horizontal or "center", vertical="center",
+        text_rotation=base.text_rotation, indent=base.indent, wrap_text=True,
+    )
+
+
+def build_workbook(header, blocks, output_path, package_label="packages", package_breakdown=False):
     ref_wb = load_workbook(REFERENCE_PATH)
     ref_ws = ref_wb[SHEET_NAME]
 
@@ -492,13 +530,34 @@ def build_workbook(header, blocks, output_path):
         col_letter = get_column_letter(c)
         refs = ",".join(f"{col_letter}{r}" for r in subtotal_rows)
         gt_vals[c] = f"=SUM({refs})"
+    # An LCL breakdown ("1 box" / "2 crates") IS the package total, so it
+    # takes over the whole column - no summed figure above it. FCL keeps the
+    # formula, with "packages" as its unit below.
+    if package_breakdown:
+        gt_vals[COL_PKG] = None
     style_row(row, REF_GRANDTOTAL_ROW, gt_vals)
     row += 1
 
     units_row = row
     units_vals = dict(zip((COL_PKG, COL_NET, COL_GROSS, COL_VOL, COL_QTY),
-                           ("Crate", "kgs.", "kgs.", "cbm.", "qty")))
+                           (package_label, "kgs.", "kgs.", "cbm.", "qty")))
+    if package_breakdown:
+        # The breakdown goes in the merged cell below, keyed off gt_row.
+        units_vals[COL_PKG] = None
     style_row(row, REF_UNITS_ROW, units_vals)
+
+    pkg_lines = package_label.count("\n") + 1
+    if package_breakdown:
+        # Take over both rows of the package column and stack the counts
+        # there, in place of the figure the formula would have produced.
+        ws.merge_cells(start_row=gt_row, start_column=COL_PKG, end_row=units_row, end_column=COL_PKG)
+        _wrap(ws.cell(row=gt_row, column=COL_PKG, value=package_label))
+        # Two rows already fit two lines; anything longer needs the extra.
+        if pkg_lines > 2:
+            ws.row_dimensions[units_row].height = ROW_HEIGHT_PER_LINE * (pkg_lines - 1)
+    elif pkg_lines > 1:
+        _wrap(ws.cell(row=row, column=COL_PKG))
+        ws.row_dimensions[row].height = ROW_HEIGHT_PER_LINE * pkg_lines
 
     # "GRAND TOTAL:" spans both rows vertically, like the reference's B97:B98
     ws.merge_cells(start_row=gt_row, start_column=COL_NAME, end_row=units_row, end_column=COL_NAME)
@@ -569,6 +628,25 @@ def validate(items, grand_total):
     return warnings
 
 
+def prompt_package_label():
+    """Console counterpart to the GUI's shipment-mode prompt. Returns
+    (package_label, package_breakdown) for build_workbook."""
+    fcl = input("Is this an FCL shipment? [y/N]: ").strip().lower().startswith("y")
+    if fcl:
+        return format_package_label(True), False
+    counts = {}
+    for key, singular, _plural in PACKAGE_TYPES:
+        while True:
+            text = input(f"Number of {key}: ").strip() or "0"
+            try:
+                counts[key] = int(text)
+            except ValueError:
+                print(f"  '{text}' is not a whole number.")
+                continue
+            break
+    return format_package_label(False, counts), True
+
+
 def main():
     argv = list(sys.argv[1:])
     odoo_pdf = "--odoo" in argv
@@ -602,7 +680,10 @@ def main():
         blocks = build_blocks(classified)
         print(f"✅ Grouped into {len(blocks)} category/subtype block(s).")
 
-        build_workbook(header, blocks, output_path)
+        package_label, package_breakdown = prompt_package_label()
+
+        build_workbook(header, blocks, output_path,
+                       package_label=package_label, package_breakdown=package_breakdown)
         print(f"✅ Wrote output workbook: {output_path}")
     except (ExtractionError, GenerationError, OdooError, OverridesError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
